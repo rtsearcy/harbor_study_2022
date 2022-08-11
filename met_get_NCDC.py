@@ -12,6 +12,9 @@ import pandas as pd
 import numpy as np
 import requests
 import os
+import warnings
+
+warnings.filterwarnings('ignore')
 
 # Inputs
 folder = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/aux_data'
@@ -20,14 +23,20 @@ airport_file = os.path.join(folder, 'airports_metadata.csv')  # file with statio
 sd = '2022-07-31'  # start date, in YYYY-MM-DD format (account for previous day)
 ed = '2022-08-03'  # end date, account for 8hr UTC shift
 
+SF = 10  # scaling factor
+
+air_list = ['Half Moon Bay'] # list(df_air.index)  # or custom list on airport locations
+
+res = '30T'  # 30T, 1H;  find observations closest to these times
+
+
 ### Import Airport Stations
 df_air = pd.read_csv(airport_file)
 df_air.set_index('NAME', inplace=True)
-air_list = ['Half Moon Bay'] # list(df_air.index)  # or custom list on airport locations
-
 print('Meterological Data\nDirectory: ' + folder )
 for a in air_list:
     print('\nProcessing meteorological data for ' + a + ' (' + df_air.loc[a]['CALL'] + ')')
+
 
 ### Grab data from NCDC
     USAF = str(df_air.loc[a]['USAF'])
@@ -45,7 +54,9 @@ for a in air_list:
         }
     print('  Searching for raw data via NCDC')
     r = requests.get(url, params=payload)
+    
     try:
+        # Organize data request
         r.raise_for_status()
         df_raw = pd.DataFrame(r.json())
         df_raw = df_raw[df_raw['REPORT_TYPE'] == 'FM-15']  # METAR format only
@@ -55,8 +66,16 @@ for a in air_list:
         sd_new = str(df_raw.index[0].date())
         ed_new = str(df_raw.index[-1].date())
         print('Min. Date - ' + sd_new + '\nMax Date - ' + ed_new)
-        cols = ['NAME', 'STATION', 'CALL_SIGN', 'REM', 'TMP', 'DEW', 'SLP', 'WND', 'AA1']
+        
+        # Select relevant columns
+        cols = ['NAME', 'STATION', 'CALL_SIGN', 'REM', 
+                'TMP', 'DEW', 'MA1', 'WND', 'OC1',
+                'AA1', 'GD1','CIG','VIS']
         df_raw = df_raw[cols]
+        
+        ''' TMP - air temp; DEW - dew point temp; WND - wind conditions;
+            AA1 - precip; GD1 - cloud cover code; VIS - horizontal visibility;
+            CIG - ceiling height; MA1- pressure (SLP NAN), OC1 - wind gust '''
 
         # Save raw METAR data
         raw_file = a.replace(' ', '_') + '_raw_METAR_data_' + sd_new.replace('-', '') + '_' \
@@ -69,14 +88,15 @@ for a in air_list:
         continue
 
     
-### Process Raw METAR Data #
-    SF = 10  # scaling factor
-    df_raw = df_raw.resample('H').last()  # Resample by hour, selecting last value if multiple
-    # Note: timestamp now shows exactly on the hour, values are from the last METAR of that hour
-    #     Ex. 8:00 - values from 8:56
-    # This means that for calculation of sums and means grouped by day, the 0 hour will be included for that day
-    # For rain_6h (first 6h of rain for the day, values from hour 0 - 5 should be included)
-
+### Process Raw METAR Data
+    
+    # time
+    time_range = pd.date_range(sd_new, ed_new, freq=res)
+    df_raw = df_raw.reindex(time_range, method='nearest')
+    
+    #df_raw = df_raw.resample('H').last()  # Resample by hour, selecting last value if multiple
+    #df_raw.index = df_raw.index.shift(1)  # samples collected on minute 55 go to next hour
+    
     # Temperature (degC)
     df_raw['temp'] = df_raw['TMP'][df_raw['TMP'].notnull()].apply(lambda x: x.split(',')[0])
     df_raw['temp'] = pd.to_numeric(df_raw['temp'], errors='coerce')/SF
@@ -90,7 +110,7 @@ for a in air_list:
     print('Dew point temperature parsed')
 
     # Sea Level Pressure (mbar)
-    df_raw['pres'] = df_raw['SLP'][df_raw['SLP'].notnull()].apply(lambda x: x.split(',')[0])
+    df_raw['pres'] = df_raw['MA1'][df_raw['MA1'].notnull()].apply(lambda x: x.split(',')[0])
     df_raw['pres'] = pd.to_numeric(df_raw['pres'], errors='coerce') / SF
     df_raw['pres'][df_raw['pres'] > 1500] = np.nan  # Account for 99999 values
     print('Sea level pressure parsed')
@@ -105,6 +125,12 @@ for a in air_list:
     df_raw['wspd'] = pd.to_numeric(df_raw['wspd'], errors='coerce') / SF
     df_raw['wspd'][df_raw['wspd'] > 90] = np.nan
     print('Wind speed parsed')
+    
+    # Gust (m/s)
+    df_raw['gust'] = df_raw['OC1'][df_raw['OC1'].notnull()].apply(lambda x: x.split(',')[0])
+    df_raw['gust'] = pd.to_numeric(df_raw['gust'], errors='coerce') / SF
+    df_raw['gust'][df_raw['gust'] > 100] = np.nan  # Account for 99999 values
+    print('Gust parsed')
 
     # Precipitation (mm)
     df_raw['rain'] = df_raw['AA1'][df_raw['AA1'].notnull()].apply(lambda x: x.split(',')[1])
@@ -113,75 +139,29 @@ for a in air_list:
     df_raw['rain'][df_raw['rain'] > 900] = np.nan
     print('Rain parsed')
 
-    # Parameterize met data into variables
-    df_vals = df_raw[['temp', 'dtemp', 'pres', 'wspd', 'wdir', 'rain']]  # Values dataframe
-    rounder = {'temp': 1,  # sig figs
-               'dtemp': 1,
-               'pres': 1,
-               'wspd': 1,
-               'wdir': 0,
-               'rain': 1}
+    # Ceiling (m)
+    df_raw['ceiling'] = df_raw['CIG'][df_raw['CIG'].notnull()].apply(lambda x: x.split(',')[0])
+    df_raw['ceiling'] = pd.to_numeric(df_raw['ceiling'], errors='coerce')
+    ## 22000 = unlimited
+    df_raw['ceiling'][df_raw['ceiling'] > 10000] = np.nan  # Account for 99999 values
+    
+    # Visibility (m)
+    df_raw['vis'] = df_raw['VIS'][df_raw['VIS'].notnull()].apply(lambda x: x.split(',')[0])
+    df_raw['vis'] = pd.to_numeric(df_raw['vis'], errors='coerce')
+    df_raw['vis'][df_raw['gust'] > 800000] = np.nan  # Account for 99999 values
+    
+    # Cloud (category)
+    df_raw['cloud'] = df_raw['GD1'][df_raw['GD1'].notnull()].apply(lambda x: x.split(',')[0])
+    df_raw['cloud'] = pd.to_numeric(df_raw['cloud'], errors='coerce')
+    cloud_map = {0:'clear', 1:'few', 2:'scattered', 3:'broken', 4: 'overcast',
+                 5:'obscured', 6:'partially_obs', 9: np.nan}
+    df_raw['cloud'] = df_raw['cloud'].map(cloud_map)
+    
 
-    hourly_file = a.replace(' ', '_') + '_hourly_data_' + sd_new.replace('-', '') + '_' \
+### Save processed parameters 
+    df_met = df_raw[['temp', 'dtemp', 'pres', 'wspd', 'wdir', 'gust',
+                      'rain', 'ceiling','vis','cloud']]  
+
+    hourly_file = a.replace(' ', '_') + '_met_data_' + sd_new.replace('-', '') + '_' \
                 + ed_new.replace('-', '') + '.csv'
-    df_vals.to_csv(os.path.join(folder, hourly_file))
-    
-    
-    # df_daily = pd.DataFrame(index=df_vals.resample('D').mean().index)
-    # df_vars = pd.DataFrame(index=df_vals.resample('D').mean().index)
-
-    # # Mean
-    # for c in df_vals.columns:
-    #     if c != 'rain':
-    #         df_daily[c] = round(df_vals[c].resample('D').mean(), rounder[c])
-    #         df_vars[c + '1'] = df_daily[c].shift(1, freq='D')  # previous day
-    # # Max
-    # for c in df_vals.columns:
-    #     if c not in ['wdir', 'rain']:
-    #         df_daily[c + '_max'] = df_vals[c].resample('D').max()
-    #         df_vars[c + '1_max'] = df_daily[c + '_max'].shift(1, freq='D')  # previous day
-
-    # # Min
-    # for c in df_vals.columns:
-    #     if c not in ['wdir', 'rain']:
-    #         df_daily[c + '_min'] = df_vals[c].resample('D').min()
-    #         df_vars[c + '1_min'] = df_daily[c + '_min'].shift(1, freq='D')  # previous day
-
-    # rr = 4  # rain rounder
-    # # rain_6h - First 6 hours of rain in the day
-    # # df_vals_6h = df_vals[(df_vals.index.hour == 0) | (df_vals.index.hour == 1) | (df_vals.index.hour == 2) | (
-    # #  df_vals.index.hour == 3) | (df_vals.index.hour == 4) | (df_vals.index.hour == 5)]
-    # # df_daily['rain_6h'] = df_vals_6h['rain'].resample('D').sum()
-    # # df_vars['lograin_6h'] = round(np.log10(df_daily['rain_6h']), rr)
-    # # df_vars['lograin_6h'][np.isneginf(df_vars['lograin_6h'])] = round(np.log10(0.005), rr)
-
-    # # rain
-    # df_daily['rain'] = df_vals['rain'].resample('D').sum()
-    # for i in range(1, 8):  # rain1 - rain7, lograin1-lograin7
-    #     df_daily['rain' + str(i)] = df_daily['rain'].shift(i, freq='D')
-    #     df_vars['lograin' + str(i)] = round(np.log10(df_daily['rain' + str(i)]), rr)
-    #     df_vars['lograin' + str(i)][np.isneginf(df_vars['lograin' + str(i)])] = round(np.log10(0.005), rr)
-
-    # total_list = list(range(2, 8)) + [14, 30]
-    # for j in total_list:  # rain2T-rain7T
-    #     df_daily['rain' + str(j) + 'T'] = 0.0
-    #     for k in range(j, 0, -1):
-    #         df_daily['rain' + str(j) + 'T'] += df_daily['rain'].shift(k, freq='D')
-    #     df_vars['lograin' + str(j) + 'T'] = round(np.log10(df_daily['rain' + str(j) + 'T']), rr)
-    #     df_vars['lograin' + str(j) + 'T'][np.isneginf(df_vars['lograin' + str(j) + 'T'])] = round(np.log10(0.005), rr)
-
-    # # Wet Days
-    # df_daily['wet'] = (df_daily[['rain3T']] > 2.54).any(axis=1).astype(int)
-    # # Not including same day rain because not available for daily runs, and samples are typically taken early in the day
-    # df_vars['wet'] = (df_vars[['lograin3T']] > 0.4048).any(axis=1).astype(int)
-
-    # # Save to file
-    # dailyfile = a.replace(' ', '_') + '_daily_data_' + sd_new.replace('-', '') + '_' + ed_new.replace('-', '') + '.csv'
-    # df_daily.index.rename('date', inplace=True)
-    # df_daily.to_csv(os.path.join(outfolder, dailyfile))  # Save daily file
-    # print('\nDaily data saved to: ' + dailyfile)
-
-    # outfile = a.replace(' ', '_') + '_Met_Variables_' + sd_new.replace('-', '') + '_' + ed_new.replace('-', '') + '.csv'
-    # df_vars.index.rename('date', inplace=True)
-    # df_vars.to_csv(os.path.join(outfolder, outfile))  # Save vars file
-    # print('Meteorological variables saved to: ' + outfile)
+    df_met.to_csv(os.path.join(folder, hourly_file))

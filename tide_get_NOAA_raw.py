@@ -25,7 +25,7 @@ for key in stations_dict:
     datum = 'MLLW'  # Mean Lower Low Water (Lowest tide if diurnal)
     units = 'metric'
     time_zone = 'lst'  # Local Standard Time (ignore DLS)
-    product = 'predictions'
+    #product = 'predictions'
     product = 'water_level'
     form = 'json'
 
@@ -85,6 +85,8 @@ for key in stations_dict:
     # Save to file
     if product == 'predictions':
         df.columns = ['dt', 'tide']
+    else:
+        df.columns = ['dt', 'tide', 'std','flag','qa']
     save_file = path + station_name.replace(' ', '_') + '_tide_' + product + '_' +  \
     begin_date.strftime('%Y%m%d') + '_' + end_date.strftime('%Y%m%d') + '.csv'
     df.to_csv(save_file, index=False)
