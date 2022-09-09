@@ -55,7 +55,7 @@ CV =  df[FIB].std() / df[FIB].mean() # coefficienrt of variations (stdev / mean)
 # measurement of dispersion (normalized)
 
 # Differences in subsequent samples
-df.ENT.diff() # difference in consecutive samples
+df.ENT.diff() # difference in consecutive samples , equivalent to df.ENT - df.ENT.shift()
 df.ENT.diff().abs() / df.ENT.mean() # difference normalized by experimental mean
 (df.ENT.diff().abs() / df.ENT.mean()).describe().round(3)
 
@@ -72,3 +72,4 @@ C['ENT'].sort_values()
 # Downsampling
 df.resample('1D').mean() # aggrefate by day, take mean
 df_ds = df.resample('1H').nearest() # take nearest sample to every 1 hour
+
