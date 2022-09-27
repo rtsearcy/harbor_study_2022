@@ -11,8 +11,8 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 
-
-file = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/test_data.csv'
+## Load Data
+file = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/all_data.csv'
 
 df = pd.read_csv(file)   # read data using pandas (pd)
 df = df.dropna(how='all')
@@ -21,6 +21,7 @@ df['dt'] = pd.to_datetime(df['dt'])  # convert to DateTime object
 df.set_index('dt', inplace=True)  # Set dt as index
 
 df = df[(df.site == 'PP7') & (df['shift'] != 'Sprint')]
+
 
 
 FIB = {'TC':10000,
@@ -47,7 +48,7 @@ for f in FIB:
     
 # Summarize
 print(df[FIB].describe().round(2))
-df.sum()[['TC_BLOQ','TC_exc']]  # total exc/BLOQ
+df.sum()[['ENT_BLOQ','ENT_exc']]  # total exc/BLOQ
 
 
 # Variation
@@ -61,13 +62,23 @@ df.ENT.diff().abs() / df.ENT.mean() # difference normalized by experimental mean
 
 ## FOR JAKE: % SAMPLES THAT CHANGE BLOQ/EXC STATUS
 # hint: use df[f+'_BLOQ'].shift()
-
+df['ENT_BLOQ'].diff().abs().sum() / (len(df) - 1)
+df['ENT_exc'].diff().abs().sum() / (len(df) - 1)
 
 # Correlation
 C = df.corr(method = 'spearman')
 C[FIB].loc[FIB]
 C['ENT'].sort_values()
 
+df['tide_stage'] = (df.tide > 1).astype(int)
+df.groupby('tide_stage').describe()[['FC','ENT']].round(1)
+df.groupby('tide_stage').sum()[['ENT_BLOQ','ENT_exc']]
+
+df['daytime'] = (df.hour.isin([8,9,10,11,12,13,14,15,16,17,18,19])).astype(int)
+df.groupby('daytime').describe()[['FC','ENT']].round(1)
+df.groupby('daytime').sum()[['ENT_BLOQ','ENT_exc']]
+
+df.groupby('cloud').sum()[['ENT_BLOQ','ENT_exc']]
 
 # Downsampling
 df.resample('1D').mean() # aggrefate by day, take mean

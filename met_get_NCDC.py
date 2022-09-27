@@ -21,7 +21,7 @@ folder = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data
 airport_file = os.path.join(folder, 'airports_metadata.csv')  # file with station metadata (see below for necessary columns)
 
 sd = '2022-07-31'  # start date, in YYYY-MM-DD format (account for previous day)
-ed = '2022-08-03'  # end date, account for 8hr UTC shift
+ed = '2022-08-04'  # end date, account for 8hr UTC shift
 
 SF = 10  # scaling factor
 
