@@ -18,9 +18,10 @@ warnings.filterwarnings('ignore')
 
 # Inputs
 folder = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/aux_data'
+folder = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/hindcast'
 airport_file = os.path.join(folder, 'airports_metadata.csv')  # file with station metadata (see below for necessary columns)
 
-sd = '2022-07-31'  # start date, in YYYY-MM-DD format (account for previous day)
+sd = '2017-01-01'  # start date, in YYYY-MM-DD format (account for previous day)
 ed = '2022-08-04'  # end date, account for 8hr UTC shift
 
 SF = 10  # scaling factor
@@ -161,7 +162,7 @@ for a in air_list:
 ### Save processed parameters 
     df_met = df_raw[['temp', 'dtemp', 'pres', 'wspd', 'wdir', 'gust',
                       'rain', 'ceiling','vis','cloud']]  
-
+    df_met.index.name = 'dt'
     hourly_file = a.replace(' ', '_') + '_met_data_' + sd_new.replace('-', '') + '_' \
                 + ed_new.replace('-', '') + '.csv'
     df_met.to_csv(os.path.join(folder, hourly_file))

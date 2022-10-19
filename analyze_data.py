@@ -67,7 +67,8 @@ def plot_spines(axx, offset=8): # Offset position, Hide the right and top spines
 
 
 #%% Load Data
-file = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/all_data.csv'
+folder = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/'
+file = os.path.join(folder, 'all_data.csv')
 
 df = pd.read_csv(file)   # read data using pandas (pd)
 df = df.dropna(how='all')
@@ -92,30 +93,38 @@ for f in FIB:
     
 # Tide
 df['tide_high'] = (df.tide > 1).astype(int)
-df['tide_stage'] = 'ebb_flood'
-low_idx = [0,1,2,
-           20,21,22,23,24,25,26,27,
-           44,45,46,47,48,49,50,51,
-           68,69,70,71,72,73,74,75,76,
-           92,93,94,95]
-df.loc[df.iloc[low_idx].index, 'tide_stage'] = 'low'
-high_idx = [8,9,10,11,12,13,14,
-            32,33,34,35,36,37,38,
-            59,60,61,62,63,64,
-            80,81,82,83,84,85,86,87,88]
-df.loc[df.iloc[high_idx].index,'tide_stage'] = 'high'
+# df['tide_stage'] = 'ebb_flood'
+# low_idx = [0,1,2,
+#            20,21,22,23,24,25,26,27,
+#            44,45,46,47,48,49,50,51,
+#            68,69,70,71,72,73,74,75,76,
+#            92,93,94,95]
+# df.loc[df.iloc[low_idx].index, 'tide_stage'] = 'low'
+# high_idx = [8,9,10,11,12,13,14,
+#             32,33,34,35,36,37,38,
+#             59,60,61,62,63,64,
+#             80,81,82,83,84,85,86,87,88]
+# df.loc[df.iloc[high_idx].index,'tide_stage'] = 'high'
 
 # Met
 df['awind'] = df['wspd'] * round(np.sin(((df['wdir'] - beach_angle) / 180) * np.pi), 1)
+df['awind'].fillna(0, inplace=True) # for 0 wind speed values
 df['owind'] = df['wspd'] * round(np.cos(((df['wdir'] - beach_angle) / 180) * np.pi), 1)
-df['owind_bin'] = (df.owind > 0).astype(int)
-df.loc[df['owind'].isna(),'owind_bin'] = np.nan
+df['owind'].fillna(0, inplace=True)
+# df['owind_bin'] = (df.owind > 0).astype(int)
+# df.loc[df['owind'].isna(),'owind_bin'] = np.nan
 
 ### Separate data
 df = df[df.site != 'Control']  # drop controls
 df_spatial = df.copy().loc[df[df.site=='Mav'].index]
 df_sprint = df.copy().loc['2022-08-02 11:00:00':'2022-08-02 11:30:00']
 df = df[(df.site == 'PP7') & (df['shift'] != 'sprint')]
+
+### Save for modeling
+df_save = df.copy()
+df_save.drop(['TC','FC','ENT', 'site','gust','wdir',
+              'ceiling', 'rain', 'notes'], axis=1, inplace=True) # drop
+df_save.to_csv(os.path.join(folder, 'PP7_variables.csv'))
 
 #%% Plot FIB Time Series
 plot_type = 'stem'  # line, stem
@@ -136,7 +145,10 @@ for f in FIB:
     
     plt.axhline(np.log10(FIB[f]), color=pal3c[c-1], ls=':', lw=1)
     
-    plt.ylabel(r'log$_{10}$ MPN/100 ml')
+    if c==2:
+        plt.ylabel(r'log$_{10}$ MPN/100 ml')
+    else:
+        plt.ylabel('')
     plt.ylim(ll,3.5)
 
     plt.xlim(df.index[0], df.index[-1])
@@ -168,14 +180,17 @@ plt.tight_layout()
 #%% Summary Stats / Variation
 
 ## Overall
-print(df[FIB].describe().round(2))
+print(df[FIB].describe().round(0))
 print('\n')
-print(df.sum()[[c for c in df.columns if ('exc' in c) or ('BLOQ' in c)]])  # total exc/BLOQ
+for f in FIB:
+    print(f + ' BLOQ: ' + str(df[f+'_BLOQ'].sum()) + ' (' + str((100*df[f+'_BLOQ'].sum()/len(df)).round(1)) + '%)'  )
+    print(f + ' EXC: ' + str(df[f+'_exc'].sum()) + ' (' + str((100*df[f+'_exc'].sum()/len(df)).round(1)) + '%)'  )
+
 
 ## Coefficient of Variation
 CV =  100 * df[FIB].std() / df[FIB].mean() # coefficienrt of variations (stdev / mean)
 # measurement of dispersion (normalized)
-print('\nCV (All Data)')
+print('\nCV (%, All Data)')
 print(CV.round(1))
 
 ## Differences in subsequent samples
@@ -192,10 +207,13 @@ for f in FIB:
     vals, counts = np.unique(df[f],return_counts=True)
     print('\nShannon Entropy: ')
     print(round(stats.entropy(counts/len(df[f])),3))
+    
+## FIB by shift
+#sns.boxplot(x='shift', y = 'value', hue='variable', data = df.melt(id_vars=['shift'],value_vars=['logTC','logFC','logENT']))
 
 
 #%% Autocorrelation
-acf_type = 'partial'  # auto, partial
+acf_type = 'auto'  # auto, partial
 
 plt.figure(figsize=(7.5,5))
 c=1
@@ -333,7 +351,7 @@ C = df.corr(method = 'spearman')
 print(C[FIB].loc[FIB].round(2)) # w FIB
 print('\n')
 
-evs = ['tide','wtemp','sal','turb','chl','rad','temp','pres','owind','awind']
+evs = ['tide','wtemp','sal','turb','chl','rad','temp','dtemp', 'pres','owind','awind']
 print(C[FIB].loc[evs + ['hours_from_noon']].round(2)) # w Enviro Vars
 
 ### Cross correlation
@@ -404,7 +422,7 @@ for v in ['tide_high', 'tide_stage', 'daytime']:
     sns.boxplot(x='variable',y='value',hue=v,
                 data=df.melt(value_vars=['logTC','logFC','logENT'], id_vars=[v]))
     
-    plt.ylabel('rlog$_{10}$ MPN/100 ml')
+    plt.ylabel(r'log$_{10}$ MPN/100 ml')
     plt.xlabel('')
     plt.xticks(ticks=[0,1,2], labels=FIB)
     
@@ -535,3 +553,7 @@ flier_shape(plt.gca())
 
 plt.legend(frameon=False, loc='upper left', ncol=3)
 plt.tight_layout()
+
+## Relationship w EVs
+df_spatial.groupby(['site','tide_high']).describe()['ENT'].round()
+

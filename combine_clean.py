@@ -44,7 +44,7 @@ pp7 = df.iloc[idx]
 other = df[~df.index.isin(idx)]
 
 # interpolate missing data in variables with few missing
-for v in ['rad','turb','temp','dtemp','pres','wspd','wdir']:
+for v in ['rad','chl', 'turb','sal','temp','dtemp','pres','wspd','wdir']:
     pp7.loc[:,v] = pp7[v].interpolate(limit=2, limit_area='inside')
     if v == 'wdir':
         pp7.loc[pp7['wspd']==0, v] = np.nan  # no wdir if wspd = 0
@@ -53,6 +53,8 @@ for v in ['rad','turb','temp','dtemp','pres','wspd','wdir']:
 df = pp7.append(other).sort_index()
 cols = [c for c in df.columns if c != 'notes']
 df = df[cols + ['notes']]
+
+df['rad'] = df.rad / 100 # adjust rad to W / m2
 
 ## Save
 df.to_csv(os.path.join(basefolder, 'all_data.csv'), index=False)
