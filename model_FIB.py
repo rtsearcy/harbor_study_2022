@@ -19,13 +19,13 @@ from scipy import stats
 import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor as VIF
 
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression, LinearRegression, LassoCV
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.linear_model import LogisticRegression, LinearRegression, LassoCV, ElasticNet
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.neural_network import MLPRegressor, MLPClassifier
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import confusion_matrix, roc_curve, r2_score, roc_auc_score, balanced_accuracy_score
-from sklearn.feature_selection import RFE, VarianceThreshold
+from sklearn.feature_selection import RFE, RFECV, VarianceThreshold
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 
 
@@ -225,24 +225,310 @@ def multicollinearity_check(X, thr=5):
         return X
     else:
         return X
+
+def fit_lm(X, y, score_metric, output_bin=True, seed=0, select_vars='all', multi=False, cv=5):  
+    '''Fits Regression model after selecting variables
+    X - calibration independent data; 
+    y - calibration dependant variable;
+    output_bin - is y a binary output? (or continuous)
+    C - model regularization coefficient 
+        - float: smaller - more regularization of variables);
+        - If integer, test grid of size C to find optimal regulatization
+    select_vars - variable selection method
+        - ' all' - use all variables in X_train
+        - 'force' - use only keep_vars to model with
+        - else, perform feature selection
+    cv - number of cross-validation steps
+    scorer - model evaluation metric (roc_auc, accuracy)
     
+    '''
+    
+    if output_bin:
+        #score_metric='f1' # accuracy, f1, recall
+        reg_param = 'C'
+        lm = LogisticRegression(C = 1, 
+                                penalty = 'elasticnet', # l1, l2, elasticnet, None 
+                                l1_ratio = 0.5,
+                                class_weight = 'balanced', # None, balanced
+                                solver = 'saga',
+                                random_state=seed)
+        
+    else:
+        reg_param = 'alpha'
+        #scorer='neg_root_mean_squared_error'  # r2, 
+        lm = ElasticNet(alpha = 0.1, 
+                        l1_ratio = 0.5,
+                        random_state=seed)
+
+    if select_vars in ['all','force']:
+        features = X.columns
+        
+    else:
+        ## Permutation method (narrow down big variable amounts)
+        print('\nNarrowing down variables w/ permutation importances (scoring: ' + score_metric + ')')
+        lm.fit(X,y)
+        temp = permutation_importance(lm, X, y, 
+                                      scoring=score_metric, 
+                                      random_state=seed,
+                                      n_repeats=cv)['importances_mean']
+        temp = pd.Series(data=temp, index=X.columns).sort_values(ascending=False)
+        #features = list(temp.index[0:10])
+        features = list(temp[temp > 1.5*temp.mean()].index)  # Select the variables > X times the mean importance
+        assert len(features) > 0, 'Linear Regression failed to select any variables'
+        if len(features) < 3:
+            features = list(temp.index[0:3])
+        
+        print('  ' + str(len(features)) + ' features selected')
+        print(*features)
+        X = X[features]
+        
+
+        c=0
+        print('\nRFECV Variable Selection (scoring: ' + score_metric + ')')
+        while c<1:
+        
+            ## Recursive Feature Elimination - Stepwise variable selection
+            S = RFECV(lm, 
+                      cv=cv, 
+                      scoring=score_metric,
+                      min_features_to_select=3,
+                      verbose=0).fit(np.array(X), np.array(y))
+            
+            if multi:  # Check multicolinearity 
+                old_len = len(features)    
+                X = multicollinearity_check(X[features], thr=5)
+                features = X.columns
+                if len(features)<old_len:
+                    c-=1
+            c+=1   
+            
+        features = X.columns[list(np.where(S.support_)[0])]
+        print('  ' + str(len(features)) + ' feature(s) selected')
+        print(*features)
+        
+    ### Fit Model
+    
+    ## Grid Search for best parameters
+    print('\nGrid Search for best model parameters (scoring: ' + score_metric + ')')
+    gs = GridSearchCV(lm, 
+                          param_grid={reg_param:[0.0001, 0.001, 0.01, 0.1, 1, 10],
+                                      'l1_ratio': [0, 0.1, 0.25, .5, .75, 0.9, 1]},
+                          cv=cv, 
+                          scoring = score_metric,
+                          verbose = 1)
+    
+    gs.fit(X[features], y)
+    lm = gs.best_estimator_
+    print('\n')
+    print(lm)
+    
+    #lm.fit(X[features], y) # Fit model
+    
+    return list(features), lm
+
+
+def fit_rf(X, y, score_metric, output_bin=True, n_trees=300, max_depth=3, max_features=.75, max_samples=.75, min_samples_leaf=3, seed=0, select_vars='all', cv=5):  
+    '''Fits Random Forest model
+    
+    X - calibration independent data; 
+    y - calibration dependant variable;
+    select_vars - variable selection method
+        - ' all' - use all variables in X_train
+        - 'force' - use only keep_vars to model with
+        - else, perform feature selection
+    '''
+    if output_bin:
+        rf = RandomForestClassifier(n_estimators=n_trees, 
+                                    oob_score=True,
+                                    max_depth=max_depth,  # None - expands until all leaves are pure
+                                    max_features=max_features,
+                                    max_samples=max_features,
+                                    min_samples_leaf=min_samples_leaf,
+                                    class_weight='balanced', # None, 'balanced'
+                                    random_state=seed,
+                                    n_jobs=-1)
+        #score_metric = 'recall' # accuracy, recall, f1, roc_auc
+        
+    else:
+        rf = RandomForestRegressor(n_estimators=n_trees, 
+                                   oob_score=True,
+                                   max_depth=max_depth,  # None - expands until all leaves are pure
+                                   max_features=max_features,
+                                   max_samples=max_features,
+                                   min_samples_leaf=min_samples_leaf,
+                                   random_state=seed)
+        
+        #score_metric = 'neg_root_mean_squared_error' # r2, max_error, neg_mean_absolute_error, neg_root_mean_squared_error
+        
+    if select_vars in ['all','force']:
+        features = X.columns
+        
+    else:  # Use variable selection method
+    
+        ## Random Forest Permutation method (narrow down big variable amounts)
+        print('\nNarrowing down variables w/ permutation importances (scoring: ' + score_metric + ')')
+        rf.fit(X,y)
+        temp = permutation_importance(rf, X, y, 
+                                      scoring=score_metric, 
+                                      random_state=seed,
+                                      n_repeats=cv)['importances_mean']
+        temp = pd.Series(data=temp, index=X.columns).sort_values(ascending=False)
+        #features = list(temp.index[0:10])
+        features = list(temp[temp > 1.5*temp.mean()].index)  # Select the variables > X times the mean importance
+        #assert len(features) > 0, 'Random Forest Regression failed to select any variables'
+        if len(features) < 3:
+            features = list(temp.index[0:10])
+        
+        print('  ' + str(len(features)) + ' features selected')
+        print(*features)
+        X = X[features]
+        
+        ## Recursive Feature Elimination - Stepwise variable selection
+        print('\nRFECV Variable Selection (scoring: ' + score_metric + ')')
+        S = RFECV(rf, 
+                  cv=cv, 
+                  scoring=score_metric,
+                  min_features_to_select=3,
+                  verbose=0).fit(np.array(X), np.array(y))
+        
+        features = X.columns[list(np.where(S.support_)[0])]
+        print('\n' + str(len(features)) + ' feature(s) selected')
+        print(*features)
+        
+    ### Fit Model
+    
+    ## Grid Search for best parameters
+    print('\nGrid Search for best model parameters (scoring: ' + score_metric + ')')
+    gs = GridSearchCV(rf, 
+                          param_grid={'max_depth':[3,5],
+                                      'max_features': [0.25, .5],
+                                      #'max_samples': [.5,.75],
+                                      'min_samples_leaf':[1, 3, 5]},
+                          cv=cv, 
+                          scoring = score_metric,
+                          verbose = 1)
+    
+    gs.fit(X[features], y)
+    rf = gs.best_estimator_
+    print('\n')
+    print(rf)
+    
+    # rf.fit(X[features], y) # Fit Model (simple)
+
+    return list(features), rf 
+
+def fit_ann(X, y, score_metric, output_bin=True, seed=0, select_vars='all', cv=5):  
+    '''Fits Neural Network model
+    
+    X - calibration independent data; 
+    y - calibration dependant variable;
+    select_vars - variable selection method
+        - ' all' - use all variables in X_train
+        - 'force' - use only keep_vars to model with
+        - else, perform feature selection
+    '''
+    if output_bin:
+        ann = MLPClassifier(hidden_layer_sizes = (8,), 
+                            activation='relu',  #tanh, logistic
+                            solver='adam',   # adam, sgd, lbfgs
+                            alpha=0.0001,
+                            #learning_rate_init=0.1,
+                            early_stopping=True,
+                            max_iter=500,
+                            random_state=0)
+    else:
+        ann = MLPRegressor(hidden_layer_sizes = (8,), 
+                            activation='relu',  #tanh, logistic
+                            solver='adam',   # adam, sgd, lbfgs
+                            alpha=0.0001,
+                            early_stopping=True,
+                            #learning_rate_init=0.1,
+                            max_iter=500,
+                            random_state=0)
+        
+        #score_metric = 'neg_root_mean_squared_error' # r2, max_error, neg_mean_absolute_error, neg_root_mean_squared_error
+        
+    if select_vars in ['all','force']:
+        features = X.columns
+        
+    else:  # Use variable selection method
+    
+        ## Random Forest Permutation method (narrow down big variable amounts)
+        print('\nNarrowing down variables w/ permutation importances (scoring: ' + score_metric + ')')
+        ann.fit(X,y)
+        temp = permutation_importance(ann, X, y, 
+                                      scoring=score_metric, 
+                                      random_state=seed,
+                                      n_repeats=cv)['importances_mean']
+        temp = pd.Series(data=temp, index=X.columns).sort_values(ascending=False)
+        #features = list(temp.index[0:10])
+        features = list(temp[temp > 1.5*temp.mean()].index)  # Select the variables > X times the mean importance
+        #assert len(features) > 0, 'Random Forest Regression failed to select any variables'
+        if len(features) < 3:
+            features = list(temp.index[0:10])
+        
+        print('  ' + str(len(features)) + ' features selected')
+        print(*features)
+        X = X[features]
+        
+        
+        # ## Recursive Feature Elimination - Stepwise variable selection
+        # print('\nRFECV Variable Selection (scoring: ' + score_metric + ')')
+        # S = RFECV(ann, 
+        #           cv=cv, 
+        #           scoring=score_metric,
+        #           min_features_to_select=3,
+        #           verbose=0).fit(np.array(X), np.array(y))
+        
+        # features = X.columns[list(np.where(S.support_)[0])]
+        # print('\n' + str(len(features)) + ' feature(s) selected')
+        # print(*features)
+        
+    ### Fit Model
+    
+    ## Grid Search for best parameters
+    print('\nGrid Search for best model parameters (scoring: ' + score_metric + ')')
+    
+    layers = [(2*len(X.columns),), 
+              (4, (2*len(X.columns),)), 
+              (4,8,4,),
+              (16,32,),
+              (8,8,3,)]
+    
+    gs = GridSearchCV(ann, 
+                          param_grid={
+                                      'hidden_layer_sizes':layers,
+                                      'activation':['relu','logistic','tanh'],
+                                      'alpha': [0.00001, 0.0001, 0.001],
+                                      },
+                          cv=cv, 
+                          scoring = score_metric,
+                          verbose = 1)
+    
+    gs.fit(X[features], y)
+    ann = gs.best_estimator_
+    print('\n')
+    print(ann)
+
+    return list(features), ann 
+
 def model_eval(true, predicted, thresh=0.5, output_bin=True):  # Evaluate Model Performance
     # if true.dtype == 'float':
         
     if not output_bin:
         r2 = r2_score(true, predicted)
         rmse = np.sqrt(((true - predicted)**2).mean())
-        
-    true = (true > thresh).astype(int)  # Convert to binary if predicted.dtype == 'float':
-    predicted = (predicted > thresh).astype(int)
 
     samples = len(true)  # number of samples
-    exc = true.sum()  # number of exceedances
+    exc = (true>thresh).sum()  # number of exceedances
     
     if exc == 0:
         auc = np.nan
     else:
         auc = roc_auc_score(true, predicted)
+        
+    true = (true > thresh).astype(int)  # Convert to binary if predicted.dtype == 'float':
+    predicted = (predicted > thresh).astype(int)
 
     cm = confusion_matrix(true, predicted)   # Lists number of true positives, true negatives,false pos,and false negs.
     if cm.size == 1: ## No exc observed or predicted
@@ -255,8 +541,8 @@ def model_eval(true, predicted, thresh=0.5, output_bin=True):  # Evaluate Model 
         spec = cm[0, 0] / (cm[0, 1] + cm[0, 0])  # specificity - TN / TN + FP
         acc = (cm[0, 0] + cm[1, 1]) / (cm[0, 0] + cm[1, 1] + cm[0, 1] + cm[1, 0])
         bal_acc = balanced_accuracy_score(true, predicted) # balanced acc -> deals with class imbalance
-    
-    
+
+
     if output_bin:
         out = {'sens': round(sens, 3), 'spec': round(spec, 3), 'acc': round(acc, 3),
                'bal_acc': round(bal_acc, 3), 'AUC': round(auc, 3), 'N': samples, 'exc': exc}
@@ -267,6 +553,19 @@ def model_eval(true, predicted, thresh=0.5, output_bin=True):  # Evaluate Model 
  
     return out
 
+#%% Inputs
+folder = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/'
+
+f = 'ENT'
+output_bin = True
+
+miss_allow = .15
+keep_vars = []
+
+model_types = ['ANN'] #['LM','RF','ANN']
+scale = True
+save = False
+
 ### Constants
 FIB = {'TC':10000,
        'FC': 400,
@@ -275,7 +574,6 @@ FIB = {'TC':10000,
 LOQ = 10
 
 #%% Load Data
-folder = '/Volumes/GoogleDrive/My Drive/high_frequency_wq/harbor_study_2022/data/'
 
 ### HF Sampling Data
 df = pd.read_csv(os.path.join(folder, 'PP7_variables.csv'), 
@@ -318,9 +616,6 @@ print(str(hind.index[0]) + ' - ' + str(hind.index[-1]))
 
 
 #%% Pre-Process Data
-f = 'ENT'
-output_bin = False
-
 if output_bin:
     dep_var = f + '_exc'
     exc_thresh = 0.5
@@ -328,10 +623,7 @@ else:
     dep_var = 'log' + f  
     exc_thresh = np.log10(FIB[f])
     
-miss_allow = .15
-keep_vars = []
 
-    
 ### Non-Applicable Variables
 drop_list = []
 
@@ -390,21 +682,22 @@ y_train = df[dep_var]
 X_train = df[[c for c in df if c != dep_var]]
     
 
-#%% Variable Selection
-''' Per Searcy and Boehm 2021, select variables using RF first, then fit other
-models'''
-var_select_method = 'forest'
-interact_var = ['rad', 'hours_from_noon', 'tide','tide_high', 'awind']
-# skip interaction variables for now, check correlations,
+#%% Variable Selection (Prior to Model Fitting)
+# ''' Per Searcy and Boehm 2021, select variables using RF first, then fit other
+# models'''
+# var_select_method = 'forest'
+# interact_var = ['rad', 'hours_from_noon', 'tide','tide_high', 'awind']
+# # skip interaction variables for now, check correlations,
 
-X_train = select_vars(y_train, X_train, method=var_select_method, interaction=False, interact_var=interact_var)
-features = list(X_train.columns)
+# X_train = select_vars(y_train, X_train, method=var_select_method, interaction=False, interact_var=interact_var)
+# features = list(X_train.columns)
 
 
 #%% Train and Test Models
-model_types = ['LM','RF','ANN']
-scale = True
-save = False
+if output_bin:
+    score_metric = 'balanced_accuracy'
+else:
+    score_metric = 'neg_root_mean_squared_error'
 
 print('\nModeling: ')
 
@@ -416,87 +709,120 @@ if scale:
 
 ### Train
 for m in model_types:
-    print('\n')  
-    if m == 'LM':   # Linear Model 
-        if output_bin: # Logistic Regression
-            print('\n- - Logistic Regression - -')
-            model = LogisticRegression(C = 0.1, 
-                                    penalty = 'elasticnet', # l1, l2, elasticnet, None 
-                                    l1_ratio = 0.5,
-                                    class_weight = 'balanced', # None, balanced
-                                    solver = 'saga',
-                                    random_state=0)
+    ### Regression
+    if m == 'LM':
+        print('\n\n* * Regression  * * ')
+        features, model = fit_lm(X_train, y_train, score_metric, output_bin=output_bin, select_vars='select')
+        
+        if output_bin:
+            #print('\nBinary Logistic Regression:')
+            print(str(round(model.intercept_[0], 2)) + ' - intercept')
+            for x in range(0,len(model.coef_[0])):
+                print(str(round(model.coef_[0][x], 4)) + ' - ' + features[x])
+            
         else:
-            # Generalized Least Squares
-            print('\n- - Generalized Least Squares Regression - -')
-            model = sm.GLSAR(y_train, 
-                             sm.add_constant(X_train), 
-                             rho=2, 
-                             missing='drop', 
-                             hasconst=True).iterative_fit(maxiter=5)
+            #print('\nMultiple Linear Regression:')
+            print(str(round(model.intercept_, 2)) + ' - intercept')
+            for x in range(0,len(model.coef_)):
+                print(str(round(model.coef_[x], 2)) + ' - ' + features[x])
+            #print('\nSelected alpha: ' + str(model.alpha_))
+    
+    ### Random Forest
+    elif m == 'RF':
+        print('\n\n* * Random Forest * *')
+        features, model = fit_rf(X_train, y_train, score_metric, output_bin=output_bin, select_vars='select')
+        
+        print('\nFeature Importances: ')
+        for x in range(0,len(features)):
+            print(str(round(model.feature_importances_[x], 2)) + ' - ' + features[x])
+    
+    ### Neural Network
+    elif m == 'ANN':
+        print('\n\n* * Neural Network * *')
+        features, model = fit_ann(X_train, y_train, score_metric, output_bin=output_bin, select_vars='select')
+        
+    # if m == 'LM':   # Linear Model 
+    #     if output_bin: # Logistic Regression
+    #         print('\n- - Logistic Regression - -')
+    #         model = LogisticRegression(C = 0.1, 
+    #                                 penalty = 'elasticnet', # l1, l2, elasticnet, None 
+    #                                 l1_ratio = 0.5,
+    #                                 class_weight = 'balanced', # None, balanced
+    #                                 solver = 'saga',
+    #                                 random_state=0)
+    #     else:
+    #         # Generalized Least Squares
+    #         print('\n- - Generalized Least Squares Regression - -')
+    #         model = sm.GLSAR(y_train, 
+    #                          sm.add_constant(X_train), 
+    #                          rho=2, 
+    #                          missing='drop', 
+    #                          hasconst=True).iterative_fit(maxiter=5)
         
 
     
-    elif m == 'RF':  # Random Forests
-        print('\n- - Random Forest - -')
+    # elif m == 'RF':  # Random Forests
+    #     print('\n- - Random Forest - -')
         
-        if output_bin:
-            model = RandomForestClassifier(n_estimators=1000, 
-                                           oob_score=True,
-                                           max_depth=3,  # None - expands until all leaves are pure
-                                           max_features=0.75,
-                                           max_samples=0.75,
-                                           min_samples_leaf=3,
-                                           class_weight='balanced', # None, 'balanced'
-                                           random_state=0,
-                                           n_jobs=-1)
-        else:
-            model = RandomForestRegressor(n_estimators=1000, 
-                                          oob_score=True,
-                                          max_features=0.75,
-                                          random_state=0)
+    #     if output_bin:
+    #         model = RandomForestClassifier(n_estimators=1000, 
+    #                                        oob_score=True,
+    #                                        max_depth=3,  # None - expands until all leaves are pure
+    #                                        max_features=0.75,
+    #                                        max_samples=0.75,
+    #                                        min_samples_leaf=3,
+    #                                        class_weight='balanced', # None, 'balanced'
+    #                                        random_state=0,
+    #                                        n_jobs=-1)
+    #     else:
+    #         model = RandomForestRegressor(n_estimators=1000, 
+    #                                       oob_score=True,
+    #                                       max_features=0.75,
+    #                                       random_state=0)
                 
         
-    elif m == 'ANN':  # Artificial Neural Network (MLP)
-        print('\n- - Artificial Neural Network - -')
-        nodes = 2*len(features)  # number hidden layer nodes (see Park et al 2018)
+    # elif m == 'ANN':  # Artificial Neural Network (MLP)
+    #     print('\n- - Artificial Neural Network - -')
+    #     nodes = 2*len(features)  # number hidden layer nodes (see Park et al 2018)
         
-        if output_bin:
-            model = MLPClassifier(hidden_layer_sizes = (nodes,), 
-                                activation='relu',  #tanh, logistic
-                                solver='adam',   # adam, sgd, lbfgs
-                                #alpha=0.00001,
-                                #learning_rate_init=0.1,
-                                max_iter=500,
-                                random_state=0)
-        else:
-            model = MLPRegressor(hidden_layer_sizes = (nodes,), 
-                                activation='relu',  #tanh, logistic
-                                solver='adam',   # adam, sgd, lbfgs
-                                #alpha=0.00001,
-                                #learning_rate_init=0.1,
-                                max_iter=500,
-                                random_state=0)
+    #     if output_bin:
+    #         model = MLPClassifier(hidden_layer_sizes = (nodes,), 
+    #                             activation='relu',  #tanh, logistic
+    #                             solver='adam',   # adam, sgd, lbfgs
+    #                             #alpha=0.00001,
+    #                             #learning_rate_init=0.1,
+    #                             max_iter=500,
+    #                             random_state=0)
+    #     else:
+    #         model = MLPRegressor(hidden_layer_sizes = (nodes,), 
+    #                             activation='relu',  #tanh, logistic
+    #                             solver='adam',   # adam, sgd, lbfgs
+    #                             #alpha=0.00001,
+    #                             #learning_rate_init=0.1,
+    #                             max_iter=500,
+    #                             random_state=0)
     
 
 ### Model Perf in Training
     if output_bin:
-        model.fit(X_train, y_train)
+        #model.fit(X_train, y_train)
         pred_train = model.predict_proba(X_train[features])[:,1]
         
     else:
-        if m in ['RF','ANN']:
-            print('\nSummary of Model Fit')
-            model.fit(X_train, y_train) 
-            pred_train = model.predict(X_train)
+        #if m in ['RF','ANN']:
+            #print('\nSummary of Model Fit')
+            #model.fit(X_train[features], y_train) 
+        pred_train = model.predict(X_train[features])
             
-        elif m in ['LM']:
-            #print(model.summary2())
-            pred_train = model.predict(sm.add_constant(X_train))        
+        # elif m in ['LM']:
+        #     #print(model.summary2())
+        #     pred_train = model.predict(sm.add_constant(X_train[features]))        
     
     
     print('\nTraining:')
     print(model_eval(y_train, pred_train, thresh=exc_thresh, output_bin=output_bin))
+    
+    
     
 ### Save data and models
     # if save:  
@@ -509,6 +835,7 @@ for m in model_types:
     #         model.save(os.path.join(tc_folder, model_file))
 
 
+
 ### Hindcast Test Set
     start_yr = '2020'
     end_yr = '2021'
@@ -516,22 +843,25 @@ for m in model_types:
     hc = hind[start_yr:end_yr].copy()
     #hc = hc.merge(get_interaction(hc, interact_var), left_index=True, right_index=True)
     
-    X_hc = hc[features].dropna()
-    y_hc = hc[dep_var].reindex_like(X_hc)
-    
-    
+    y_hc = hc[dep_var].copy()
+    X_hc = hc.copy().drop([dep_var], axis=1)
     if scale:
+        X_hc = X_hc[scaler.feature_names_in_]
         X_hc = pd.DataFrame(data=scaler.transform(X_hc), index=X_hc.index, columns=X_hc.columns) 
+    X_hc = X_hc[features].dropna()
+    y_hc = y_hc.reindex_like(X_hc)
+    
         
     if output_bin:
         y_hc_persist = hc[f+'_ant_exc'].reindex_like(X_hc)
         pred_hc = model.predict_proba(X_hc[features])[:,1]
     else:
         y_hc_persist = hc[dep_var+'_ant'].reindex_like(X_hc)
-        if m not in ['LM']:
-            pred_hc = model.predict(X_hc)
-        else:
-            pred_hc = model.predict(sm.add_constant(X_hc))
+        pred_hc = model.predict(X_hc)
+        # if m not in ['LM']:
+        #     pred_hc = model.predict(X_hc)
+        # else:
+        #     pred_hc = model.predict(sm.add_constant(X_hc))
     
     print('\n\nHindcast (' + str(start_yr) + '-' + str(end_yr) + '):')
     print(model_eval(y_hc, pred_hc, thresh=exc_thresh, output_bin=output_bin))
