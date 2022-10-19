@@ -17,19 +17,17 @@ import seaborn as sns
 from scipy import stats
 
 import statsmodels.api as sm
-import statsmodels.formula.api as smf
 from statsmodels.stats.outliers_influence import variance_inflation_factor as VIF
 
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression, LinearRegression, LassoCV
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.neural_network import MLPRegressor
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.neural_network import MLPRegressor, MLPClassifier
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import confusion_matrix, roc_curve, r2_score, roc_auc_score, balanced_accuracy_score
 from sklearn.feature_selection import RFE, VarianceThreshold
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 
-import beach_model_harbor_study as bm
 
 def lag_vars(df, var_list, n_lags, interval=None):
     ''' Creates lag variables. If 'interval', shift by that number of minutes'''
@@ -158,7 +156,7 @@ def select_vars(y, X, method='forest', interaction=True, interact_var=[], corr_c
     print(X.columns.values)    
     return X
 
-def check_corr(dep, ind, thresh=1):
+def check_corr(dep, ind, thresh=.95):
     '''
     Check if confounding variables have correlations > thresh, and drop the one with 
     least correlation to the dependnet variable
@@ -235,8 +233,8 @@ def model_eval(true, predicted, thresh=0.5, output_bin=True):  # Evaluate Model 
         r2 = r2_score(true, predicted)
         rmse = np.sqrt(((true - predicted)**2).mean())
         
-        true = (true > thresh).astype(int)  # Convert to binary if predicted.dtype == 'float':
-        predicted = (predicted > thresh).astype(int)
+    true = (true > thresh).astype(int)  # Convert to binary if predicted.dtype == 'float':
+    predicted = (predicted > thresh).astype(int)
 
     samples = len(true)  # number of samples
     exc = true.sum()  # number of exceedances
@@ -321,7 +319,15 @@ print(str(hind.index[0]) + ' - ' + str(hind.index[-1]))
 
 #%% Pre-Process Data
 f = 'ENT'
-dep_var = 'log' + f  # f + '_exc'
+output_bin = False
+
+if output_bin:
+    dep_var = f + '_exc'
+    exc_thresh = 0.5
+else:
+    dep_var = 'log' + f  
+    exc_thresh = np.log10(FIB[f])
+    
 miss_allow = .15
 keep_vars = []
 
@@ -382,6 +388,7 @@ print(*df.columns, sep=', ')
 ### Split into y and X
 y_train = df[dep_var]
 X_train = df[[c for c in df if c != dep_var]]
+    
 
 #%% Variable Selection
 ''' Per Searcy and Boehm 2021, select variables using RF first, then fit other
@@ -395,65 +402,101 @@ features = list(X_train.columns)
 
 
 #%% Train and Test Models
-model_types = ['GLS','RF','ANN']
+model_types = ['LM','RF','ANN']
+scale = True
 save = False
 
 print('\nModeling: ')
 
+### Scale Variables
+if scale:
+    scaler = StandardScaler()
+    scaler.fit(X_train)
+    X_train = pd.DataFrame(data=scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
+
 ### Train
 for m in model_types:
-    print('\n- ' + m + ' -')  
-    if m == 'GLS':  # Generalized Least Squares
-        model = sm.GLSAR(y_train, 
-                         sm.add_constant(X_train), 
-                         rho=2, 
-                         missing='drop', 
-                         hasconst=True).iterative_fit(maxiter=5)
+    print('\n')  
+    if m == 'LM':   # Linear Model 
+        if output_bin: # Logistic Regression
+            print('\n- - Logistic Regression - -')
+            model = LogisticRegression(C = 0.1, 
+                                    penalty = 'elasticnet', # l1, l2, elasticnet, None 
+                                    l1_ratio = 0.5,
+                                    class_weight = 'balanced', # None, balanced
+                                    solver = 'saga',
+                                    random_state=0)
+        else:
+            # Generalized Least Squares
+            print('\n- - Generalized Least Squares Regression - -')
+            model = sm.GLSAR(y_train, 
+                             sm.add_constant(X_train), 
+                             rho=2, 
+                             missing='drop', 
+                             hasconst=True).iterative_fit(maxiter=5)
         
+
+    
     elif m == 'RF':  # Random Forests
         print('\n- - Random Forest - -')
-        model = RandomForestRegressor(n_estimators=1000, 
-                                      oob_score=True,
-                                      max_features=0.75,
-                                      random_state=0)
         
-        # Scale inputs
-        scaler = StandardScaler()
-        X_trainS = scaler.fit_transform(X_train)
-        model.fit(X_trainS, y_train)
+        if output_bin:
+            model = RandomForestClassifier(n_estimators=1000, 
+                                           oob_score=True,
+                                           max_depth=3,  # None - expands until all leaves are pure
+                                           max_features=0.75,
+                                           max_samples=0.75,
+                                           min_samples_leaf=3,
+                                           class_weight='balanced', # None, 'balanced'
+                                           random_state=0,
+                                           n_jobs=-1)
+        else:
+            model = RandomForestRegressor(n_estimators=1000, 
+                                          oob_score=True,
+                                          max_features=0.75,
+                                          random_state=0)
+                
         
     elif m == 'ANN':  # Artificial Neural Network (MLP)
         print('\n- - Artificial Neural Network - -')
         nodes = 2*len(features)  # number hidden layer nodes (see Park et al 2018)
-        model = MLPRegressor(hidden_layer_sizes = (nodes,), 
-                            activation='relu',  #tanh, logistic
-                            solver='adam',   # adam, sgd, lbfgs
-                            #alpha=0.00001,
-                            #learning_rate_init=0.1,
-                            max_iter=500,
-                            random_state=0)
-        # Scale inputs
-        scaler = StandardScaler()
-        X_trainS = scaler.fit_transform(X_train)
-        model.fit(X_trainS, y_train)
-    
-### Model summary
-    if m in ['RF','ANN']:
-        print('\nSummary of Model Fit')
-        if m=='RF':
-            print('\nR-sq: ' + str(round(model.score(X_trainS, y_train),3)))
-            print('OOB RMSE: ' + str(round(model.oob_score_**.5,3)))
-            
-        else:
-            print('\nR-sq: ' + str(round(model.score(X_trainS, y_train),3)))
-        pred_train = model.predict(X_trainS)
         
-    elif m in ['MLR','GLS']:
-        print(model.summary2())
-        pred_train = model.predict()        
+        if output_bin:
+            model = MLPClassifier(hidden_layer_sizes = (nodes,), 
+                                activation='relu',  #tanh, logistic
+                                solver='adam',   # adam, sgd, lbfgs
+                                #alpha=0.00001,
+                                #learning_rate_init=0.1,
+                                max_iter=500,
+                                random_state=0)
+        else:
+            model = MLPRegressor(hidden_layer_sizes = (nodes,), 
+                                activation='relu',  #tanh, logistic
+                                solver='adam',   # adam, sgd, lbfgs
+                                #alpha=0.00001,
+                                #learning_rate_init=0.1,
+                                max_iter=500,
+                                random_state=0)
+    
+
+### Model Perf in Training
+    if output_bin:
+        model.fit(X_train, y_train)
+        pred_train = model.predict_proba(X_train[features])[:,1]
+        
+    else:
+        if m in ['RF','ANN']:
+            print('\nSummary of Model Fit')
+            model.fit(X_train, y_train) 
+            pred_train = model.predict(X_train)
+            
+        elif m in ['LM']:
+            #print(model.summary2())
+            pred_train = model.predict(sm.add_constant(X_train))        
+    
     
     print('\nTraining:')
-    print(model_eval(y_train, pred_train, thresh=np.log10(FIB[f]), output_bin=False))
+    print(model_eval(y_train, pred_train, thresh=exc_thresh, output_bin=output_bin))
     
 ### Save data and models
     # if save:  
@@ -467,7 +510,7 @@ for m in model_types:
 
 
 ### Hindcast Test Set
-    start_yr = '2018'
+    start_yr = '2020'
     end_yr = '2021'
     
     hc = hind[start_yr:end_yr].copy()
@@ -475,17 +518,25 @@ for m in model_types:
     
     X_hc = hc[features].dropna()
     y_hc = hc[dep_var].reindex_like(X_hc)
-    y_hc_persist = hc[dep_var+'_ant'].reindex_like(X_hc)
     
-    if m in ['RF','ANN']:
-        pred_hc = model.predict(scaler.transform(X_hc))
+    
+    if scale:
+        X_hc = pd.DataFrame(data=scaler.transform(X_hc), index=X_hc.index, columns=X_hc.columns) 
+        
+    if output_bin:
+        y_hc_persist = hc[f+'_ant_exc'].reindex_like(X_hc)
+        pred_hc = model.predict_proba(X_hc[features])[:,1]
     else:
-        pred_hc = model.predict(sm.add_constant(X_hc))
+        y_hc_persist = hc[dep_var+'_ant'].reindex_like(X_hc)
+        if m not in ['LM']:
+            pred_hc = model.predict(X_hc)
+        else:
+            pred_hc = model.predict(sm.add_constant(X_hc))
     
     print('\n\nHindcast (' + str(start_yr) + '-' + str(end_yr) + '):')
-    print(model_eval(y_hc, pred_hc, thresh=np.log10(FIB[f]), output_bin=False))
+    print(model_eval(y_hc, pred_hc, thresh=exc_thresh, output_bin=output_bin))
     print('Persistence:')
-    print(model_eval(y_hc, y_hc_persist, thresh=np.log10(FIB[f]), output_bin=False))
+    print(model_eval(y_hc, y_hc_persist, thresh=exc_thresh, output_bin=output_bin))
 
 
 ### Nowcast Test Set (August - October)
