@@ -28,6 +28,9 @@ from sklearn.metrics import confusion_matrix, roc_curve, r2_score, roc_auc_score
 from sklearn.feature_selection import RFE, RFECV, VarianceThreshold
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 
+from sklearn.exceptions import ConvergenceWarning
+import warnings
+warnings.simplefilter("ignore", category=ConvergenceWarning)
 
 def lag_vars(df, var_list, n_lags, interval=None):
     ''' Creates lag variables. If 'interval', shift by that number of minutes'''
@@ -251,6 +254,7 @@ def fit_lm(X, y, score_metric, output_bin=True, seed=0, select_vars='all', multi
                                 l1_ratio = 0.5,
                                 class_weight = 'balanced', # None, balanced
                                 solver = 'saga',
+                                max_iter = 1000,
                                 random_state=seed)
         
     else:
@@ -512,6 +516,25 @@ def fit_ann(X, y, score_metric, output_bin=True, seed=0, select_vars='all', cv=5
 
     return list(features), ann 
 
+def model_tuner(y, y_pred, maximize='sens', min_sens=0.3, min_spec=0.5):  
+    fpr, tpr, thresholds = roc_curve(y, y_pred)  # need probability predictions
+    spec = np.round(1 - fpr, 3)
+    sens = np.round(tpr, 3)
+    
+    df_tune = pd.DataFrame(data=[thresholds,sens,spec], index=['thresh','sens','spec']).T
+        
+    if maximize == 'sens':
+        df_tune = df_tune[(df_tune.spec >= min_spec)]
+        assert len(df_tune) > 0, 'No threshold available to tune spec >= ' + min_spec
+        thresh = df_tune.iloc[-1]['thresh']
+        
+    elif maximize == 'spec':
+        df_tune = df_tune[(df_tune.sens >= min_sens)]
+        assert len(df_tune) > 0, 'No threshold available to tune sens >= ' + min_sens
+        thresh = df_tune.iloc[0]['thresh']
+    
+    return thresh
+
 def model_eval(true, predicted, thresh=0.5, output_bin=True):  # Evaluate Model Performance
     # if true.dtype == 'float':
         
@@ -528,7 +551,7 @@ def model_eval(true, predicted, thresh=0.5, output_bin=True):  # Evaluate Model 
         auc = roc_auc_score(true, predicted)
         
     true = (true > thresh).astype(int)  # Convert to binary if predicted.dtype == 'float':
-    predicted = (predicted > thresh).astype(int)
+    predicted = (predicted >= thresh).astype(int)
 
     cm = confusion_matrix(true, predicted)   # Lists number of true positives, true negatives,false pos,and false negs.
     if cm.size == 1: ## No exc observed or predicted
@@ -562,8 +585,14 @@ output_bin = True
 miss_allow = .15
 keep_vars = []
 
-model_types = ['ANN'] #['LM','RF','ANN']
+model_types = ['LM','RF'] #['LM','RF','ANN']
 scale = True
+
+hf_test = True  # split HF data into train and test subsets
+hf_test_frac = 0.25
+
+tune = True
+
 save = False
 
 ### Constants
@@ -578,6 +607,7 @@ LOQ = 10
 ### HF Sampling Data
 df = pd.read_csv(os.path.join(folder, 'PP7_variables.csv'), 
                  index_col=['dt'], parse_dates=['dt'])
+
 
 print('HF data loaded. ' + str(len(df)) + ' obs. ' + str(len(df.columns)) + 
       ' vars. Vars with missing values: ' + str((df.isna().sum() > 0).sum()))
@@ -628,7 +658,7 @@ else:
 drop_list = []
 
 ## Default
-drop_default = [v for v in df.columns if any(x in v for x in ['sample_time', 'shift','cloud','day','vis','sal','chl','turb'])] + \
+drop_default = [v for v in df.columns if any(x in v for x in ['sample_time', 'shift','cloud','day','sal','chl','turb'])] + \
              [v for v in df.columns if any(x in v for x in ['rain','flow','chl','turb']) and (('log' not in v))] 
 drop_list += drop_default
  
@@ -678,8 +708,20 @@ print(str(len(df.columns)) + ' variables remaining:')
 print(*df.columns, sep=', ')
 
 ### Split into y and X
-y_train = df[dep_var]
-X_train = df[[c for c in df if c != dep_var]]
+if hf_test:
+    y_temp = df[dep_var]
+    X_temp = df[[c for c in df if c != dep_var]]
+    
+    X_train, X_test, y_train, y_test = train_test_split(X_temp, y_temp, 
+                                                        test_size=hf_test_frac, 
+                                                        shuffle=True,
+                                                        random_state=0)
+    
+else:
+    y_train = df[dep_var]
+    X_train = df[[c for c in df if c != dep_var]]
+    y_test = []
+    X_train = []
     
 
 #%% Variable Selection (Prior to Model Fitting)
@@ -706,6 +748,7 @@ if scale:
     scaler = StandardScaler()
     scaler.fit(X_train)
     X_train = pd.DataFrame(data=scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
+    X_test = pd.DataFrame(data=scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
 
 ### Train
 for m in model_types:
@@ -740,68 +783,7 @@ for m in model_types:
     elif m == 'ANN':
         print('\n\n* * Neural Network * *')
         features, model = fit_ann(X_train, y_train, score_metric, output_bin=output_bin, select_vars='select')
-        
-    # if m == 'LM':   # Linear Model 
-    #     if output_bin: # Logistic Regression
-    #         print('\n- - Logistic Regression - -')
-    #         model = LogisticRegression(C = 0.1, 
-    #                                 penalty = 'elasticnet', # l1, l2, elasticnet, None 
-    #                                 l1_ratio = 0.5,
-    #                                 class_weight = 'balanced', # None, balanced
-    #                                 solver = 'saga',
-    #                                 random_state=0)
-    #     else:
-    #         # Generalized Least Squares
-    #         print('\n- - Generalized Least Squares Regression - -')
-    #         model = sm.GLSAR(y_train, 
-    #                          sm.add_constant(X_train), 
-    #                          rho=2, 
-    #                          missing='drop', 
-    #                          hasconst=True).iterative_fit(maxiter=5)
-        
-
-    
-    # elif m == 'RF':  # Random Forests
-    #     print('\n- - Random Forest - -')
-        
-    #     if output_bin:
-    #         model = RandomForestClassifier(n_estimators=1000, 
-    #                                        oob_score=True,
-    #                                        max_depth=3,  # None - expands until all leaves are pure
-    #                                        max_features=0.75,
-    #                                        max_samples=0.75,
-    #                                        min_samples_leaf=3,
-    #                                        class_weight='balanced', # None, 'balanced'
-    #                                        random_state=0,
-    #                                        n_jobs=-1)
-    #     else:
-    #         model = RandomForestRegressor(n_estimators=1000, 
-    #                                       oob_score=True,
-    #                                       max_features=0.75,
-    #                                       random_state=0)
-                
-        
-    # elif m == 'ANN':  # Artificial Neural Network (MLP)
-    #     print('\n- - Artificial Neural Network - -')
-    #     nodes = 2*len(features)  # number hidden layer nodes (see Park et al 2018)
-        
-    #     if output_bin:
-    #         model = MLPClassifier(hidden_layer_sizes = (nodes,), 
-    #                             activation='relu',  #tanh, logistic
-    #                             solver='adam',   # adam, sgd, lbfgs
-    #                             #alpha=0.00001,
-    #                             #learning_rate_init=0.1,
-    #                             max_iter=500,
-    #                             random_state=0)
-    #     else:
-    #         model = MLPRegressor(hidden_layer_sizes = (nodes,), 
-    #                             activation='relu',  #tanh, logistic
-    #                             solver='adam',   # adam, sgd, lbfgs
-    #                             #alpha=0.00001,
-    #                             #learning_rate_init=0.1,
-    #                             max_iter=500,
-    #                             random_state=0)
-    
+     
 
 ### Model Perf in Training
     if output_bin:
@@ -822,8 +804,25 @@ for m in model_types:
     print('\nTraining:')
     print(model_eval(y_train, pred_train, thresh=exc_thresh, output_bin=output_bin))
     
+### HF Test (Validation) Set
+    if hf_test:
+        if output_bin:
+            pred_test = model.predict_proba(X_test[features])[:,1]
+        else:
+            pred_test = model.predict(X_test[features])
     
-    
+        print('Test (Validation):')
+        print(model_eval(y_test, pred_test, thresh=exc_thresh, output_bin=output_bin))
+
+
+### Tuning
+    if tune:
+        DTP = model_tuner(y_test, pred_test)
+        print('\nTuning factor: ' + str(round(DTP,5)))
+        print('Test (Validation) [TUNED]:')
+        print(model_eval(y_test, pred_test, thresh=DTP, output_bin=output_bin))
+
+
 ### Save data and models
     # if save:  
     #     # Save model
@@ -865,6 +864,9 @@ for m in model_types:
     
     print('\n\nHindcast (' + str(start_yr) + '-' + str(end_yr) + '):')
     print(model_eval(y_hc, pred_hc, thresh=exc_thresh, output_bin=output_bin))
+    if tune:
+        print('Hindcast (TUNED):')
+        print(model_eval(y_hc, pred_hc, thresh=DTP, output_bin=output_bin))    
     print('Persistence:')
     print(model_eval(y_hc, y_hc_persist, thresh=exc_thresh, output_bin=output_bin))
 
