@@ -135,9 +135,25 @@ wtemp = wtemp.resample('30min').nearest()
 wtemp = interp(wtemp, var_list=list(wtemp.columns), limit=24)
 wtemp = lag_vars(wtemp, var_list=['wtemp'], n_lags=6, interval=30)
 
+### Salinity
+sal = pd.read_csv(os.path.join(folder,[f for f in files if ('salinity' in f)][0]),
+                  index_col=['dt'], parse_dates=['dt'])
+sal = sal['sal']
+sal = sal.to_frame()
+sal = sal.resample('30min').interpolate()  # 6h to 30m interval
+sal = lag_vars(sal, var_list=['sal'], n_lags=6, interval=30, interpolate=True)
+
+
+### Chl
+chl = pd.read_csv(os.path.join(folder,[f for f in files if ('chlorophyll' in f)][0]),
+                  index_col=['dt'], parse_dates=['dt'])
+# daily data
+chl = chl.resample('30min').nearest()
+chl = lag_vars(chl, var_list=['chl'], n_lags=6, interval=30, interpolate=True)
+
 
 ### Combine EV Data
-evs = pd.concat([tide, met, rad, wtemp], axis=1)
+evs = pd.concat([tide, met, rad, wtemp, sal, chl], axis=1)
 ## TODO: RGRESS WQ PARAMETERS
 
 ### Combine with FIB variables + Save

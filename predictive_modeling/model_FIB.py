@@ -159,7 +159,7 @@ def select_vars(y, X, method='forest', interaction=True, interact_var=[], corr_c
     print(X.columns.values)    
     return X
 
-def check_corr(dep, ind, thresh=.95):
+def check_corr(dep, ind, thresh=.85):
     '''
     Check if confounding variables have correlations > thresh, and drop the one with 
     least correlation to the dependnet variable
@@ -516,7 +516,7 @@ def fit_ann(X, y, score_metric, output_bin=True, seed=0, select_vars='all', cv=5
 
     return list(features), ann 
 
-def model_tuner(y, y_pred, maximize='sens', min_sens=0.3, min_spec=0.5):  
+def model_tuner(y, y_pred, maximize='sens', min_sens=0.3, min_spec=0.75):  
     fpr, tpr, thresholds = roc_curve(y, y_pred)  # need probability predictions
     spec = np.round(1 - fpr, 3)
     sens = np.round(tpr, 3)
@@ -585,7 +585,7 @@ output_bin = True
 miss_allow = .15
 keep_vars = []
 
-model_types = ['LM','RF'] #['LM','RF','ANN']
+model_types = ['ANN'] #['LM','RF','ANN']
 scale = True
 
 hf_test = True  # split HF data into train and test subsets
@@ -658,8 +658,8 @@ else:
 drop_list = []
 
 ## Default
-drop_default = [v for v in df.columns if any(x in v for x in ['sample_time', 'shift','cloud','day','sal','chl','turb'])] + \
-             [v for v in df.columns if any(x in v for x in ['rain','flow','chl','turb']) and (('log' not in v))] 
+drop_default = [v for v in df.columns if any(x in v for x in ['sample_time', 'shift','cloud','day','turb'])] + \
+             [v for v in df.columns if any(x in v for x in ['rain','flow','turb']) and (('log' not in v))] 
 drop_list += drop_default
  
 ## Drop other FIB variables
@@ -845,6 +845,7 @@ for m in model_types:
     y_hc = hc[dep_var].copy()
     X_hc = hc.copy().drop([dep_var], axis=1)
     if scale:
+        X_hc[[c for c in scaler.feature_names_in_ if c not in X_hc.columns]] = np.nan # add in missing features thats in scaler
         X_hc = X_hc[scaler.feature_names_in_]
         X_hc = pd.DataFrame(data=scaler.transform(X_hc), index=X_hc.index, columns=X_hc.columns) 
     X_hc = X_hc[features].dropna()

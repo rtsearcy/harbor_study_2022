@@ -93,18 +93,6 @@ for f in FIB:
     
 # Tide
 df['tide_high'] = (df.tide > 1).astype(int)
-# df['tide_stage'] = 'ebb_flood'
-# low_idx = [0,1,2,
-#            20,21,22,23,24,25,26,27,
-#            44,45,46,47,48,49,50,51,
-#            68,69,70,71,72,73,74,75,76,
-#            92,93,94,95]
-# df.loc[df.iloc[low_idx].index, 'tide_stage'] = 'low'
-# high_idx = [8,9,10,11,12,13,14,
-#             32,33,34,35,36,37,38,
-#             59,60,61,62,63,64,
-#             80,81,82,83,84,85,86,87,88]
-# df.loc[df.iloc[high_idx].index,'tide_stage'] = 'high'
 
 # Met
 df['awind'] = df['wspd'] * round(np.sin(((df['wdir'] - beach_angle) / 180) * np.pi), 1)
@@ -114,6 +102,8 @@ df['owind'].fillna(0, inplace=True)
 # df['owind_bin'] = (df.owind > 0).astype(int)
 # df.loc[df['owind'].isna(),'owind_bin'] = np.nan
 
+df.loc[df.cloud.isin(['few','broken','scattered']),'cloud'] = 'partly'
+
 ### Separate data
 df = df[df.site != 'Control']  # drop controls
 df_spatial = df.copy().loc[df[df.site=='Mav'].index]
@@ -122,28 +112,35 @@ df = df[(df.site == 'PP7') & (df['shift'] != 'sprint')]
 
 ### Save for modeling
 df_save = df.copy()
-df_save.drop(['TC','FC','ENT', 'site','gust','wdir',
+df_save.drop(['TC','FC','ENT',
+              'TC_lower','TC_upper','FC_lower','FC_upper','ENT_lower','ENT_upper',
+              'site','gust','wdir',
               'ceiling', 'rain', 'notes'], axis=1, inplace=True) # drop
 df_save.to_csv(os.path.join(folder, 'PP7_variables.csv'))
 
 #%% Plot FIB Time Series
-plot_type = 'stem'  # line, stem
+plot_type = 'line'  # line, stem
 
-plt.figure(figsize=(9,5.5))
+plt.figure(figsize=(9,5))
 
 c = 1
 for f in FIB:
     plt.subplot(4,1,c)
     if plot_type == 'line':
-        plt.plot(df['log'+ f], 'k') # line plot 
-        #plt.plot(df[f])
+        plt.plot(df['log'+ f], 'k', lw=1, marker='.') # line plot 
+        #plt.fill_between(df.index, df['log'+ f],0, color='gray', alpha=0.2)
+        plt.fill_between(df.index, 
+                         np.log10(df[f+'_upper']), 
+                         np.log10(df[f+'_lower'].replace(0,1)), 
+                         color='gray', alpha=0.3)
+
         ll = 0
     elif plot_type == 'stem':
         plt.bar(df.index,df['log'+f] + 0.5, bottom = -.5, width=.0075, color=pal3c[c-1], alpha=0.75)
         #plt.scatter(df.index,df['log'+f], color='k', s=3)
         ll = -0.15
     
-    plt.axhline(np.log10(FIB[f]), color=pal3c[c-1], ls=':', lw=1)
+    plt.axhline(np.log10(FIB[f]), color='k', alpha=0.75, ls=':', lw=1)
     
     if c==2:
         plt.ylabel(r'log$_{10}$ MPN/100 ml')
@@ -161,11 +158,12 @@ for f in FIB:
 
 # Tide
 plt.subplot(4,1,4)
-plt.plot(df.tide, 'b', alpha=0.85)
+tide_plot = df.tide.resample('10min').interpolate(method='linear').copy()
+plt.plot(tide_plot, 'b', lw=1, alpha=0.85)
 
 # Sunrise Sunset
-plt.fill_betweenx([-5,5], df.index[25], df.index[45], color='gray', alpha=0.4)
-plt.fill_betweenx([-5,5], df.index[73], df.index[93], color='gray', alpha=0.4)
+plt.fill_betweenx([-5,5], df.index[25], df.index[45], color='gray', alpha=0.2)
+plt.fill_betweenx([-5,5], df.index[73], df.index[93], color='gray', alpha=0.2)
 
 plt.ylabel('Water Level [m]')
 plt.xlim(df.index[0], df.index[-1])
@@ -175,6 +173,7 @@ plt.text(.95, .85, 'tide', transform=plt.gca().transAxes)
 plot_spines(plt.gca(), offset=0)
     
 plt.tight_layout()
+plt.savefig(os.path.join(folder.replace('data','figures_tables'),'time_series_FIB.png'), dpi=500)
 
 
 #%% Summary Stats / Variation
@@ -188,16 +187,16 @@ for f in FIB:
 
 
 ## Coefficient of Variation
-CV =  100 * df[FIB].std() / df[FIB].mean() # coefficienrt of variations (stdev / mean)
+CV =  df[FIB].std() / df[FIB].mean() # coefficienrt of variations (stdev / mean)
 # measurement of dispersion (normalized)
 print('\nCV (%, All Data)')
-print(CV.round(1))
+print(CV.round(2))
 
 ## Differences in subsequent samples
 for f in FIB:
     print('\n' + f)
     print('delta:') # difference in consec. samples, normalized by experimental mean
-    print((100*df[f].diff().abs() / df[f].mean()).describe().round(1))
+    print((df[f].diff().abs() / df[f].mean()).describe().round(2))
 
     print('\n% samples changing status (BLOQ/EXC):') #  % SAMPLES THAT CHANGE BLOQ/EXC STATUS
     print(round(100* df[f + '_BLOQ'].diff().abs().sum() / (len(df) - 1), 1))
@@ -213,9 +212,9 @@ for f in FIB:
 
 
 #%% Autocorrelation
-acf_type = 'auto'  # auto, partial
+acf_type = 'partial'  # auto, partial
 
-plt.figure(figsize=(7.5,5))
+plt.figure(figsize=(4.5,5))
 c=1
 for f in FIB:
     plt.subplot(3,1,c)
@@ -269,8 +268,8 @@ CV_std = pd.DataFrame()
 D_mean = pd.DataFrame()
 D_std = pd.DataFrame()
 
-cv = lambda x: 100 * np.std(x, ddof=1) / np.mean(x) # coefficient of variations (stdev / mean)
-delta = lambda x: 100 * (x.diff().abs() / x.mean()).mean().round(3)
+cv = lambda x: np.std(x, ddof=1) / np.mean(x) # coefficient of variations (stdev / mean)
+delta = lambda x: (x.diff().abs() / x.mean()).mean().round(3)
 
 for s in sample_rates:
     if s == '30m':
@@ -281,12 +280,12 @@ for s in sample_rates:
         D = delta(df_ds[FIB])
         D_std_temp = pd.Series(dtype=float)
         
-        
     else:
         temp = pd.Series(dtype=float)
         temp_d = pd.Series(dtype=float)
         for i in range(0, 2*int(s.replace('H',''))):  # iterate through shift choices
             df_ds = df.shift(-i).resample(s, origin='start').nearest() # take nearest sample to every 1 hour
+            #df_ds = df.shift(-i).resample(s, origin='start').mean() # take mean of each group
             
             temp = pd.concat([temp, cv(df_ds[FIB])], axis=1)
             temp_d = pd.concat([temp_d, delta(df_ds[FIB])], axis=1)
@@ -305,6 +304,8 @@ for s in sample_rates:
     D_mean = pd.concat([D_mean, D.to_frame(name=s)], axis=1)
     D_std = pd.concat([D_std, D_std_temp.to_frame(name=s)], axis=1)
     D_std = D_std.fillna(0)
+    
+D_sprint = (df_sprint[FIB].diff().abs() / df_sprint[FIB].mean()).mean().round(3)
 
 
 ## Plot
@@ -320,7 +321,7 @@ for f in FIB:
     c+=1
 
 plot_spines(plt.gca())
-plt.ylabel('%')
+plt.ylabel('')
 plt.xlabel('')
 #plt.xticks(ticks=x, labels=sample_rates)
 plt.gca().set_xticklabels([])
@@ -336,12 +337,44 @@ for f in FIB:
     c+=1
 
 plot_spines(plt.gca())
-plt.ylabel('%')
+plt.ylabel('')
 plt.xlabel('')
 plt.xticks(ticks=x, labels=sample_rates)
-plt.text(-.0, .9, 'delta', transform=plt.gca().transAxes)
+plt.text(-.0, .9, 'δ', transform=plt.gca().transAxes)
 
 plt.tight_layout()
+plt.savefig(os.path.join(folder.replace('data','figures_tables'),'downsample_CV_delta.png'), dpi=500)
+
+
+## Plot - delta only (+ sprint)
+plt.figure(figsize=(8,3))
+x = range(0,len(D_mean.columns))
+
+# Delta
+c = 0
+for f in FIB:
+    plt.plot(x, D_mean.loc[f], marker='o', color=pal3c[c], label=f) # mean
+    plt.fill_between(x, D_mean.loc[f]-D_std.loc[f], D_mean.loc[f]+D_std.loc[f], color=pal3c[c], alpha=0.3) # error
+    
+    # Sprint
+    plt.plot([-1,0], [D_sprint[f], D_mean.loc[f].iloc[0]], ls=':', marker='', color=pal3c[c])
+    plt.scatter([-1], [D_sprint[f]], marker='^', color=pal3c[c])
+    
+    c+=1
+
+plot_spines(plt.gca())
+plt.ylabel('Mean δ', rotation=90, labelpad=10)
+plt.xlabel('')
+# plt.xticks(ticks=x, labels=sample_rates)
+plt.xticks(ticks= [-1] + list(x), labels= ['1m'] + sample_rates)
+
+plt.legend(loc='lower center', ncol=3, frameon=False)
+
+
+plt.tight_layout()
+plt.savefig(os.path.join(folder.replace('data','figures_tables'),'downsample_delta.png'), dpi=500)
+
+
 
 #%% Multivariate Stats
 
@@ -351,7 +384,7 @@ C = df.corr(method = 'spearman')
 print(C[FIB].loc[FIB].round(2)) # w FIB
 print('\n')
 
-evs = ['tide','wtemp','sal','turb','chl','rad','temp','dtemp', 'pres','owind','awind']
+evs = ['tide','wtemp','sal','turb','chl','rad','temp','dtemp', 'pres','wspd','owind','awind']
 print(C[FIB].loc[evs + ['hours_from_noon']].round(2)) # w Enviro Vars
 
 ### Cross correlation
@@ -397,22 +430,22 @@ for f in FIB:
 tide_high when tide above/below 1m
 '''
 
-for v in ['tide_high', 'tide_stage', 'daytime']:
+for v in ['tide_high', 'daytime', 'cloud']:
     print('\n'+v)
     print(df.groupby(v).describe()[['FC','ENT']].T.round(0))
     print(df.groupby(v).sum()[['ENT_BLOQ','ENT_exc']])
     
     ## Hypothesis Testing (EV Regimes)
     temp = df.copy().melt(id_vars=v, value_vars=['logTC','logFC','logENT'], var_name='FIB', value_name='conc').dropna()
-    print('\n'+v + ' (N=' + str(len(temp)/2) + ')')
+    print('\n'+v + ' (N=' + str(len(temp)/3) + ')')
     for f in FIB:
         kw_temp = temp[temp.FIB == 'log'+f]
-        if v == 'tide_stage':
-            kw = stats.kruskal(kw_temp[kw_temp[v]=='low']['conc'],
-                               kw_temp[kw_temp[v]=='high']['conc'],
-                               kw_temp[kw_temp[v]=='ebb_flood']['conc'])
+        if v == 'cloud':
+            kw = stats.kruskal(kw_temp[kw_temp[v]=='clear']['conc'],
+                               kw_temp[kw_temp[v]=='overcast']['conc'],
+                               kw_temp[kw_temp[v]=='partly']['conc'])
         else:
-            kw = stats.kruskal(kw_temp[kw_temp[v]==0]['conc'],kw_temp[kw_temp[v]==1]['conc'])
+            kw = stats.kruskal(kw_temp[kw_temp[v]==0]['conc'], kw_temp[kw_temp[v]==1]['conc'])
         print('\n' + f + ' - ' + str(round(kw[1],3)))
         print('mean/med:')
         print(kw_temp.groupby([v]).describe().round(2)['conc'][['mean','50%']])
@@ -431,9 +464,53 @@ for v in ['tide_high', 'tide_stage', 'daytime']:
     flier_shape(plt.gca())
     plt.tight_layout()
 
+#%% Summary of EVs
+evs = ['wtemp', 'sal','chl','turb', 'rad',
+       'tide','temp','wspd']#
+#evs = ['temp','dtemp', 'pres','owind','awind']
+
+ev_lab = ['°C','-','µg/L', 'NTU','W/sq.m', 'm above MLLW', '°C','m/s']
+
+df[evs].describe().round(1)
+df.cloud.value_counts() / 96
+
+plt.figure(figsize=(9,9))
+
+c = 1
+for e in evs:
+    plt.subplot(len(evs),1,c)
+
+    plt.plot(df[e], 'k') # line plot 
+
+    plt.xlim(df.index[0], df.index[-1])
+    if c != len(evs):
+        plt.gca().set_xticklabels([])
+    
+    plt.ylabel(ev_lab[c-1])
+    plt.text(.95, .85, e, transform=plt.gca().transAxes)
+    
+    plot_spines(plt.gca(), offset=0)
+    c+=1
+
+# # Tide
+# plt.subplot(4,1,4)
+# plt.plot(df.tide, 'b', alpha=0.85)
+
+# # Sunrise Sunset
+# plt.fill_betweenx([-5,5], df.index[25], df.index[45], color='gray', alpha=0.4)
+# plt.fill_betweenx([-5,5], df.index[73], df.index[93], color='gray', alpha=0.4)
+
+# plt.ylabel('Water Level [m]')
+# plt.xlim(df.index[0], df.index[-1])
+# plt.ylim(0,2)
+
+# plt.text(.95, .85, 'tide', transform=plt.gca().transAxes)
+# plot_spines(plt.gca(), offset=0)
+    
+plt.tight_layout()
 
 #%% Sprint
-plot_type = 'stem'  # line, stem
+plot_type = 'line'  # line, stem
 
 ## TS Plot
 plt.figure(figsize=(9,4))
@@ -443,7 +520,12 @@ for f in FIB:
     plt.subplot(3,1,c)
     
     if plot_type == 'line':
-        plt.plot(df_sprint['log'+ f], 'k') # line plot 
+        plt.plot(df_sprint['log'+ f], 'k', lw=1, marker='.') # line plot 
+        #plt.fill_between(df.index, df['log'+ f],0, color='gray', alpha=0.2)
+        plt.fill_between(df_sprint.index, 
+                         np.log10(df_sprint[f+'_upper']), 
+                         np.log10(df_sprint[f+'_lower'].replace(0,1)), 
+                         color='gray', alpha=0.3)
         #plt.plot(df[f])
         ll = 0
     elif plot_type == 'stem':
@@ -470,11 +552,17 @@ for f in FIB:
 plt.suptitle('Sprint Sampling')
 plt.tight_layout()
 
+## Overall
+print(df_sprint[FIB].describe().round(0))
+print('\n')
+for f in FIB:
+    print(f + ' BLOQ: ' + str(df_sprint[f+'_BLOQ'].sum()) + ' (' + str((100*df_sprint[f+'_BLOQ'].sum()/len(df_sprint)).round(1)) + '%)'  )
+    print(f + ' EXC: ' + str(df_sprint[f+'_exc'].sum()) + ' (' + str((100*df_sprint[f+'_exc'].sum()/len(df_sprint)).round(1)) + '%)'  )
 
 ## Coefficient of Variation
 CV =  df_sprint[FIB].std() / df_sprint[FIB].mean() # coefficienrt of variations (stdev / mean)
 # measurement of dispersion (normalized)
-print('CV')
+print('\nCV')
 print(CV.round(2))
 
 ## Differences in subsequent samples
@@ -494,7 +582,6 @@ for f in FIB:
 
 #%% Spatial Data
 df_spatial.groupby('site').describe()[FIB].T.round(0)
-
 
 # Time Series
 plt.figure(figsize=(9,5.5))
@@ -556,4 +643,37 @@ plt.tight_layout()
 
 ## Relationship w EVs
 df_spatial.groupby(['site','tide_high']).describe()['ENT'].round()
+
+plt.figure(figsize=(9,3))
+sns.catplot(kind='box', x='site',y='value', hue='tide_high', col = 'variable', palette=pal3c,
+            data=df_spatial.copy().melt(id_vars=['site','tide_high'], value_vars=['logTC','logFC','logENT']).dropna())
+plt.ylabel('rlog$_{10}$ MPN/100 ml')
+plt.xlabel('')
+
+plot_spines(plt.gca())
+caps_off(plt.gca())
+flier_shape(plt.gca())
+
+plt.legend(frameon=False, loc='upper left', ncol=3)
+plt.tight_layout()
+
+
+for s in ['PP7','Mav', 'Cap']:
+    print('\n'+s)
+    
+    ## Hypothesis Testing (EV Regimes)
+    temp = df_spatial[df_spatial['site']==s].copy()\
+        .melt(id_vars=['tide_high'], 
+              value_vars=['logTC','logFC','logENT'], 
+              var_name='FIB', 
+              value_name='conc')\
+            .dropna()
+    for f in FIB:
+        kw_temp = temp[temp.FIB == 'log'+f]
+        kw = stats.kruskal(kw_temp[kw_temp['tide_high']==0]['conc'],
+                           kw_temp[kw_temp['tide_high']==1]['conc'])
+        print('\n' + f + ' - ' + str(round(kw[1],3)))
+        print('mean/med:')
+        print(kw_temp.groupby(['tide_high']).describe().round(2)['conc'][['mean','50%']])
+
 
